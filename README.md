@@ -8,6 +8,44 @@ A high-performance block-based compression utility with parallel processing, int
 
 **Note:** This is an alpha version (v0.0.0a2). APIs and file formats may change in future releases.
 
+---
+
+## Smart Algorithm Analysis (`algo.py`)
+
+`algo.py` is a predictive utility designed to analyze your data before compression. It uses Shannon Entropy and data density metrics to recommend the most efficient algorithm for your specific files, helping you avoid "data expansion" where compression actually increases file size.
+
+### Features
+
+* **Predictive Modeling**: Automatically suggests `lz4`, `zstd`, `brotli`, or `none` based on data heuristics.
+* **Entropy Analysis**: Calculates Shannon Entropy (0.0 to 8.0) to determine data randomness.
+* **Efficiency Metrics**: Tracks zero-byte density and unique byte ratios.
+* **Real-time Benchmarking**: Performs a test compression on blocks to report expected ratios and speeds (MB/s).
+
+### Usage
+
+```bash
+python3 algo.py input_file.bin --block-size 1mb --zstd-ratio 3
+```
+
+### Analysis Metrics Reference
+
+| Metric | Logic / Threshold | Recommended Action |
+|--------|-------------------|-------------------|
+| High Entropy | Entropy > 7.9 | Use `--algo none` (Data is likely already compressed/encrypted) |
+| Sparse Data | Zeros > 40% or Entropy < 3.0 | Use `--algo lz4` for maximum speed |
+| General Data | Entropy < 6.8 | Use `--algo zstd` (Default) |
+| High Redundancy | High Unique Density | Use `--algo brotli` for best ratio |
+
+### Understanding the Output
+
+The utility provides a block-by-block summary:
+
+* **Ratio**: The percentage of the original size (e.g., 70% means 30% savings).
+* **Speed**: Estimated throughput in MB/s for the selected algorithm.
+* **Status**: Displays `EXPANDED` if the compressed output is larger than the source.
+
+---
+
 ## Community Project
 
 GXD is a community-driven project, built for the community and by the community. Community contributions are highly valued and essential to the growth and improvement of this project. Whether you're reporting bugs, suggesting features, improving documentation, or submitting code, your input matters and helps make GXD better for everyone.
@@ -311,3 +349,4 @@ See [LICENSE.txt](LICENSE.txt) for the full license text.
 ---
 
 **Note**: This is an alpha release (v0.0.0a2). APIs and file formats may change in future versions. Community feedback and contributions are essential to making GXD stable and feature-complete.
+
