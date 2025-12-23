@@ -4,9 +4,42 @@
 ![Version](https://img.shields.io/badge/version-0.0.0a2-orange.svg)
 ![Status](https://img.shields.io/badge/status-alpha-yellow.svg)
 
-A high-performance block-based compression utility with parallel processing, integrity verification, and random-access capabilities.
+A high-performance block-based compression utility with parallel processing, integrity verification, random-access capabilities, and smart algorithm selection.
 
 **Note:** This is an alpha version (v0.0.0a2). APIs and file formats may change in future releases.
+
+---
+
+## What's New in This Version
+
+### Auto Algorithm Selection
+GXD now features an intelligent **auto mode** that automatically selects the best compression algorithm for each block based on data characteristics:
+- Analyzes Shannon Entropy (0.0-8.0 scale) to measure data randomness
+- Calculates zero-byte density and unique byte ratios
+- Dynamically chooses between `lz4`, `zstd`, `brotli`, or `none` per block
+- Per-block algorithm metadata stored in archive for accurate decompression
+
+### Enhanced Metadata Tracking
+Each compressed block now includes detailed metrics:
+- **Entropy value**: Measures data randomness (0.0 = perfectly uniform, 8.0 = maximum randomness)
+- **Compression time**: Per-block timing for performance analysis
+- **Timestamp**: When each block was compressed
+- **Algorithm used**: Actual algorithm applied (important for auto mode)
+
+### File Attribute Preservation
+GXD now preserves and restores original file attributes:
+- File permissions (mode)
+- Modification time (mtime)
+- Access time (atime)
+- User ID (uid) and Group ID (gid) on Unix systems
+- Automatic restoration on decompression
+
+### Archive Information Command
+New `info` command provides comprehensive archive inspection:
+- View global archive metadata (version, algorithm, total blocks)
+- Display preserved file attributes
+- List block overview with compression details
+- Inspect specific block metadata by index
 
 ---
 
@@ -55,12 +88,16 @@ GXD is a community-driven project, built for the community and by the community.
 | Feature | Description |
 |---------|-------------|
 | Multiple Algorithms | Zstandard, LZ4, Brotli, and uncompressed modes |
+| Auto Algorithm Selection | Intelligent per-block algorithm selection based on entropy analysis |
 | Parallel Processing | Multi-threaded compression/decompression using all CPU cores |
 | Block-Level Integrity | SHA-256 checksums for each data block |
 | Random Access | Seek and extract specific byte ranges without full decompression |
 | Flexible Verification | Optional integrity checking for performance optimization |
 | Text Mode | Direct UTF-8 text output to stdout |
+| File Attribute Preservation | Maintains permissions, timestamps, and ownership |
+| Archive Inspection | View metadata and block details without extraction |
 | Progress Tracking | Visual progress bars with tqdm (fallback to simple indicators) |
+| Entropy Tracking | Per-block entropy metrics for compression analysis |
 
 ## Requirements
 
@@ -86,9 +123,19 @@ pip install zstandard tqdm  # Minimal recommended setup
 python gxd.py compress input.bin output.gxd
 ```
 
+### Compress with Auto Algorithm Selection
+```bash
+python gxd.py compress input.bin output.gxd --algo auto
+```
+
 ### Decompress a File
 ```bash
 python gxd.py decompress input.gxd -o output.bin
+```
+
+### View Archive Information
+```bash
+python gxd.py info input.gxd
 ```
 
 ### Extract Specific Range
@@ -102,7 +149,7 @@ python gxd.py seek input.gxd --offset 1mb --length 512kb -o chunk.bin
 
 | Option | Values | Default | Description |
 |--------|--------|---------|-------------|
-| `--algo` | `zstd`, `lz4`, `brotli`, `none` | `zstd` | Compression algorithm to use |
+| `--algo` | `auto`, `zstd`, `lz4`, `brotli`, `none` | `zstd` | Compression algorithm to use |
 | `--block-size` | `512kb`, `1mb`, `2mb`, etc. | `1024kb` | Size of data blocks |
 | `--zstd-ratio` | `1-22` | `3` | Zstandard compression level (only applies when using zstd) |
 | `--threads` | `1-128` | All CPU cores | Number of parallel threads |
@@ -111,7 +158,9 @@ python gxd.py seek input.gxd --offset 1mb --length 512kb -o chunk.bin
 
 **Important CLI Behavior Notes:**
 
-1. **Algorithm-Specific Parameters**: The `--zstd-ratio` parameter only affects compression when using the `zstd` algorithm. If you specify a different algorithm with `--zstd-ratio`, the tool will display a warning and ignore the ratio parameter. 
+1. **Auto Algorithm Mode**: When using `--algo auto`, GXD analyzes each block's entropy and data characteristics to select the optimal algorithm (lz4, zstd, brotli, or none). The chosen algorithm is stored per-block in the archive metadata.
+
+2. **Algorithm-Specific Parameters**: The `--zstd-ratio` parameter only affects compression when using the `zstd` algorithm. If you specify a different algorithm with `--zstd-ratio`, the tool will display a warning and ignore the ratio parameter. 
 
    Example:
    ```bash
@@ -121,9 +170,9 @@ python gxd.py seek input.gxd --offset 1mb --length 512kb -o chunk.bin
    
    Output: `[!] Warning: --zstd-ratio (10) is ignored when using algorithm 'lz4'. it only applies to 'zstd'.`
 
-2. **Size Parsing**: Invalid size formats will cause the program to exit with an error message. Valid formats include: `1024` (bytes), `512kb`, `1mb`, `2gb`.
+3. **Size Parsing**: Invalid size formats will cause the program to exit with an error message. Valid formats include: `1024` (bytes), `512kb`, `1mb`, `2gb`.
 
-3. **Block Size Validation**: Block size must be greater than 0, otherwise the program will exit with an error.
+4. **Block Size Validation**: Block size must be greater than 0, otherwise the program will exit with an error.
 
 ### Decompression Options
 
@@ -134,6 +183,15 @@ python gxd.py seek input.gxd --offset 1mb --length 512kb -o chunk.bin
 | `--threads` | Number of parallel threads (default: all CPU cores) |
 | `--block-verify` | Verify integrity using SHA-256 block hashes (enabled by default) |
 | `--no-verify` | Disable integrity checks for maximum speed |
+
+**Note:** Decompression automatically detects per-block algorithms when using auto mode archives.
+
+### Info Options
+
+| Option | Description |
+|--------|-------------|
+| `--block` | Display detailed metadata for a specific block (1-based index) |
+| `--threads` | Number of threads (default: all CPU cores) |
 
 ### Seek Options
 
@@ -176,19 +234,43 @@ GXD uses a custom archive format:
 ```json
 {
   "version": "0.0.0a2",
-  "algo": "zstd",
+  "algo": "auto",
   "global_hash": "sha256_hash_of_original_file",
+  "file_attr": {
+    "mode": 33188,
+    "mtime": 1703347200.0,
+    "atime": 1703347200.0,
+    "uid": 1000,
+    "gid": 1000
+  },
   "blocks": [
     {
       "id": 0,
       "start": 6,
       "size": 12345,
       "orig_size": 1048576,
-      "hash": "block_sha256_hash"
+      "hash": "block_sha256_hash",
+      "algo": "zstd",
+      "entropy": 5.8234,
+      "time": 0.023456,
+      "timestamp": 1703347200.123
     }
   ]
 }
 ```
+
+### Metadata Fields Explained
+
+| Field | Description |
+|-------|-------------|
+| `version` | GXD format version |
+| `algo` | Global algorithm setting (can be "auto") |
+| `global_hash` | SHA-256 hash of the complete original file |
+| `file_attr` | Preserved file system attributes |
+| `blocks[].algo` | Actual algorithm used for each block |
+| `blocks[].entropy` | Shannon entropy value (0.0-8.0) |
+| `blocks[].time` | Compression time in seconds |
+| `blocks[].timestamp` | Unix timestamp when block was compressed |
 
 ## Code Signing and Verification
 
@@ -226,10 +308,19 @@ python test.py
 
 | Algorithm | Speed | Compression Ratio | Best For |
 |-----------|-------|-------------------|----------|
+| `auto` | Adaptive | Optimized | Mixed data types (recommended for varied content) |
 | `zstd` | Balanced | Good | General purpose (default) |
 | `lz4` | Fastest | Lower | Maximum speed |
 | `brotli` | Slower | Best | Maximum compression |
 | `none` | N/A | None | Integrity verification only |
+
+### Auto Mode Behavior
+
+The `auto` algorithm selection follows these rules per block:
+- **Entropy > 7.9**: Uses `none` (data is already compressed/encrypted)
+- **Zero ratio > 40% OR Entropy < 3.0**: Uses `lz4` (sparse data, prioritize speed)
+- **Entropy < 6.8**: Uses `zstd` (compressible data, good balance)
+- **Otherwise**: Uses `brotli` (high redundancy, maximize compression)
 
 ### Block Size Recommendations
 
@@ -264,6 +355,14 @@ python test.py
 
 ## Examples
 
+### Compress with Auto Algorithm Selection
+```bash
+python gxd.py compress mixed_data.bin output.gxd \
+  --algo auto \
+  --block-size 1mb \
+  --threads 8
+```
+
 ### Compress a Large Dataset
 ```bash
 python gxd.py compress dataset.bin dataset.gxd \
@@ -271,6 +370,15 @@ python gxd.py compress dataset.bin dataset.gxd \
   --block-size 2mb \
   --zstd-ratio 10 \
   --threads 16
+```
+
+### View Archive Metadata
+```bash
+# View general archive info
+python gxd.py info data.gxd
+
+# View specific block details
+python gxd.py info data.gxd --block 5
 ```
 
 ### Extract Log File Range
@@ -286,6 +394,12 @@ python gxd.py seek app.log.gxd \
 ```bash
 # Verify integrity without full extraction
 python gxd.py decompress data.gxd --no-verify > /dev/null
+```
+
+### Decompress with Attribute Restoration
+```bash
+# Original file attributes will be automatically restored
+python gxd.py decompress archive.gxd -o restored.bin
 ```
 
 ## Contributing
@@ -307,9 +421,9 @@ GXD is a community-driven project - your contributions are what make it thrive! 
 
 | Area | Ideas |
 |------|-------|
-| Features | New compression algorithms, improved performance optimizations |
+| Features | New compression algorithms, improved performance optimizations, enhanced auto-selection logic |
 | Documentation | Tutorials, use case examples, translations |
-| Testing | Additional test cases, platform-specific testing |
+| Testing | Additional test cases, platform-specific testing, auto mode validation |
 | Bug Reports | Issue identification, reproduction steps |
 | Code Quality | Refactoring, type hints, performance profiling |
 
@@ -345,8 +459,18 @@ See [LICENSE.txt](LICENSE.txt) for the full license text.
 - Built with Python's `ProcessPoolExecutor` for parallel processing
 - Compression powered by Zstandard, LZ4, and Brotli libraries
 - Progress visualization by tqdm
+- Smart algorithm selection using Shannon Entropy analysis
 
 ---
 
-**Note**: This is an alpha release (v0.0.0a2). APIs and file formats may change in future versions. Community feedback and contributions are essential to making GXD stable and feature-complete.
+## Development Status & Updates
+
+**Important Notice**: This project is maintained as a personal/community effort. The author is not committed to regular updates, and future releases may or may not come depending on time, interest, and community needs. This is an alpha release (v0.0.0a2) provided as-is.
+
+- **Update Schedule**: No guaranteed timeline for new features or bug fixes
+- **Stability**: Current version is functional but APIs and file formats may change
+- **Community Contributions**: Highly encouraged and may be the primary driver of future development
+- **Support**: Best-effort basis only
+
+If you need guaranteed maintenance or specific features, consider forking the project or contributing directly. Community feedback and contributions are welcome and may help shape future development.
 
