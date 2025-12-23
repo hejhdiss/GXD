@@ -227,6 +227,85 @@ class TestGXDMaximum(unittest.TestCase):
             self.assertEqual(f.read(), text_content)
         
         print("\n[+] Text mode verification successful.")   
+    
+    def test_auto_mode_and_seek(self):
+        self.log_test_info(
+            "test_auto_mode_and_seek", 
+            "Verifying Auto-Mode algorithm selection and Seek compatibility.",
+            "Ensure mixed data triggers different algos and Seek reads block-level metadata."
+        )
+        
+
+        block_size = 1024 * 1024
+        part1 = b"\x00" * block_size
+        part2 = b"GXD_TEST_DATA_STRUCTURED_DATA_" * (block_size // 30)
+        part3 = os.urandom(block_size)
+        mixed_data = part1 + part2 + part3
+        
+        mixed_source = os.path.join(self.test_dir, "mixed_source.bin")
+        with open(mixed_source, "wb") as f:
+            f.write(mixed_data)
+
+        self.run_cmd(["compress", mixed_source, self.gxd_file, "--algo", "auto", "--block-size", "1mb"])
+
+        with open(self.gxd_file, "rb") as f:
+            data = f.read()
+            json_size = struct.unpack("<Q", data[-14:-6])[0]
+            metadata = json.loads(data[-(14 + json_size) : -14].decode())
+            
+            algos_used = {b['algo'] for b in metadata['blocks']}
+            print(f"[*] Algorithms selected by Auto-Mode: {algos_used}")
+            
+            self.assertGreater(len(algos_used), 1, "Auto-mode failed to select multiple algorithms for mixed data.")
+
+        seek_offset = block_size - 50
+        seek_length = 100
+        expected_seek_data = mixed_data[seek_offset : seek_offset + seek_length]
+        
+        _, stdout, stderr = self.run_cmd([
+            "seek", self.gxd_file, 
+            "--offset", str(seek_offset), 
+            "--length", str(seek_length)
+        ])
+        
+
+        seek_out = os.path.join(self.test_dir, "seek_out.bin")
+        self.run_cmd([
+            "seek", self.gxd_file, 
+            "--offset", str(seek_offset), 
+            "--length", str(seek_length),
+            "-o", seek_out
+        ])
+        
+        with open(seek_out, "rb") as f:
+            actual_seek_data = f.read()
+            self.assertEqual(actual_seek_data, expected_seek_data, "Seek failed to correctly extract data across auto-mode blocks.")
+
+        print("[+] Auto-Mode and Seek verification successful.")
+    def test_info_command_and_metadata(self):
+        self.log_test_info(
+            "test_info_command_and_metadata", 
+            "Checking the 'info' command and metadata preservation.",
+            "Verify that global attributes and specific block metadata are readable."
+        )
+
+        self.run_cmd(["compress", self.source_file, self.gxd_file, "--algo", "zstd"])
+
+        _, stdout, _ = self.run_cmd(["info", self.gxd_file])
+        print(f"[*] Info Command Output:\n{stdout}\n")
+
+        
+        self.assertIn("Original Mode", stdout, "Metadata 'Mode' missing from info output")
+        self.assertIn("Modify Time", stdout, "Metadata 'mtime' missing from info output")
+        self.assertIn("Access Time", stdout, "Metadata 'atime' missing from info output")
+        
+        _, stdout_block, _ = self.run_cmd(["info", self.gxd_file, "--block", "1"])
+        print(f"[*] Block 1 Info Output:\n{stdout_block}\n")
+        
+        self.assertIn("Timestamp", stdout_block, "Block-level timestamp missing")
+        self.assertIn("Entropy", stdout_block, "Block-level entropy missing")
+        
+        print("[+] Metadata Preservation and Info Command Verified.")
     def test_seek_unsupported_algorithm(self):
         self.log_test_info(
             "test_seek_unsupported_algorithm", 
@@ -250,6 +329,7 @@ class TestGXDMaximum(unittest.TestCase):
         
         if "FATAL" not in stderr:
             self.fail_with_output("Seek did not report a FATAL error on corrupted block.", stdout, stderr)
+
    
 if __name__ == "__main__":
     print(f"{'='*80}")
