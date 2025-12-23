@@ -27,6 +27,8 @@ import time
 import struct
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
+import collections
+import math 
 
 # Optional imports with dependency handling
 try:
@@ -49,6 +51,35 @@ except ImportError:
 MAGIC = b"GXDINC"
 VERSION = "0.0.0a2"
 
+def calculate_entropy(data: bytes) -> float:
+    if not data: return 0.0
+    counter = collections.Counter(data)
+    entropy = 0.0
+    for count in counter.values():
+        p_x = count / len(data)
+        entropy -= p_x * math.log2(p_x)
+    return entropy
+
+def calculate_metrics(data: bytes):
+    size = len(data)
+    if size == 0: return {"zero_ratio": 0, "unique_ratio": 0}
+    zero_ratio = data.count(0) / size
+    unique_ratio = len(set(data)) / 256
+    return {"zero_ratio": zero_ratio, "unique_ratio": unique_ratio}
+
+class GXDSmartSelector:
+    """Predicts the best algorithm for a block of data."""
+    @staticmethod
+    def predict(data: bytes) -> str:
+        entropy = calculate_entropy(data)
+        metrics = calculate_metrics(data)
+        zeros = metrics['zero_ratio']
+        
+        if entropy > 7.9: return "none"
+        if zeros > 0.4 or entropy < 3.0: return "lz4"
+        if entropy < 6.8: return "zstd"
+        return "brotli"
+    
 def render_bar(current, total, width=40):
     """Fallback visual progress bar string if tqdm is unavailable."""
     if total <= 0: return ""
@@ -89,27 +120,39 @@ class GXDCompressor:
         self.threads = threads or os.cpu_count() or 2
 
     def _compress_block(self, chunk: bytes, block_id: int):
-        """Worker function for parallel compression."""
         try:
-            if self.algo == 'zstd':
+            b_start_time = time.time()
+            actual_algo = self.algo
+            if self.algo == 'auto':
+                if not (zstd and lz4 and brotli):
+                    raise ImportError("necessary compression libraries not available for 'auto' mode.")
+                actual_algo = GXDSmartSelector.predict(chunk)
+            if actual_algo == 'zstd' and zstd:
                 if not zstd: raise ImportError("zstd module not found")
                 c_data = zstd.compress(chunk, self.zstd_ratio)
-            elif self.algo == 'lz4':
+            elif actual_algo == 'lz4' and lz4:
                 if not lz4: raise ImportError("lz4 module not found")
                 c_data = lz4.compress(chunk)
-            elif self.algo == 'brotli':
+            elif actual_algo == 'brotli' and brotli:
                 if not brotli: raise ImportError("brotli module not found")
                 c_data = brotli.compress(chunk)
             else:
                 c_data = chunk
+                actual_algo = 'none'
             
             b_hash = hashlib.sha256(chunk).hexdigest() if self.verify == 'block' else "no"
+            entropy = calculate_entropy(chunk)
+            duration = time.time() - b_start_time
             return {
                 "id": block_id,
                 "size": len(c_data),
                 "orig_size": len(chunk),
                 "hash": b_hash,
-                "data": c_data
+                "data": c_data,
+                "algo": actual_algo ,
+                "entropy": round(entropy, 4),     
+                "comp_time": round(duration, 6),
+                "timestamp": b_start_time
             }
         except Exception as e:
             return {"error": str(e), "id": block_id}
@@ -118,6 +161,14 @@ class GXDCompressor:
         if not os.path.exists(input_path):
             print(f"[-] Error: Input file '{input_path}' not found.", file=sys.stderr)
             sys.exit(1)
+        file_stat = os.stat(input_path)
+        file_meta = {
+            "mode": file_stat.st_mode,        # Permissions (e.g. 755)
+            "mtime": file_stat.st_mtime,      # Modification time
+            "atime": file_stat.st_atime,      # Access time
+            "uid": file_stat.st_uid,          # User ID (Unix)
+            "gid": file_stat.st_gid           # Group ID (Unix)
+        }
 
         print(f"[*] Compressing {input_path} -> {output_path} ({self.algo}) using {self.threads} workers\n", file=sys.stderr)
 
@@ -164,7 +215,12 @@ class GXDCompressor:
                         "start": current_offset,
                         "size": res['size'],
                         "orig_size": res['orig_size'],
-                        "hash": res['hash']
+                        "hash": res['hash'],
+                        "algo": res['algo'],
+                        "entropy": res['entropy'],     
+                        "time": res['comp_time']  ,
+                        "timestamp": res['timestamp']
+                           
                     })
                     current_offset += res['size']
 
@@ -172,6 +228,7 @@ class GXDCompressor:
                 "version": VERSION,
                 "algo": self.algo,
                 "global_hash": global_hasher.hexdigest() if global_hasher else "no",
+                "file_attr": file_meta,
                 "blocks": blocks_meta
             }
             footer_json = json.dumps(footer_data).encode('utf-8')
@@ -187,6 +244,56 @@ class GXDDecompressor:
         self.verify_request = verify_request
         self.output_text = output_text
         self.threads = threads or os.cpu_count() or 2
+    def show_info(self, input_path, block_index=None):
+        if not os.path.exists(input_path):
+            print(f"[-] Error: File not found: '{input_path}'", file=sys.stderr)
+            sys.exit(1)
+
+        with open(input_path, "rb") as f_in:
+            f_in.seek(0, os.SEEK_END)
+            actual_file_size = f_in.tell()
+            
+            f_in.seek(-(8 + len(MAGIC)), os.SEEK_END)
+            footer_len = struct.unpack("<Q", f_in.read(8))[0]
+            
+            f_in.seek(-(footer_len + 8 + len(MAGIC)), os.SEEK_END)
+            metadata = json.loads(f_in.read(footer_len).decode('utf-8'))
+            
+            blocks = metadata.get('blocks', [])
+            attr = metadata.get('file_attr', {})
+
+            print(f"\n{'='*50}")
+            print(f" GXD ARCHIVE INFORMATION")
+            print(f"{'='*50}")
+            print(f"File Name      : {os.path.basename(input_path)}")
+            print(f"GXD Version    : {metadata.get('version', 'Unknown')}")
+            print(f"Global Algo    : {metadata.get('algo', 'Unknown')}")
+            print(f"Total Blocks   : {len(blocks)}")
+            
+            if attr:
+                print(f"\n--- Preserved File Attributes ---")
+                print(f"Original Mode  : {oct(attr.get('mode', 0))}")
+                print(f"Modify Time    : {time.ctime(attr.get('mtime', 0))}")
+                print(f"Access Time    : {time.ctime(attr.get('atime', 0))}")
+
+            if block_index is not None:
+                idx = block_index - 1
+                if 0 <= idx < len(blocks):
+                    b = blocks[idx]
+                    print(f"\n--- Metadata for Block {block_index} ---")
+                    for key, value in b.items():
+                        print(f"{key.capitalize():<15}: {value}")
+                else:
+                    print(f"\n[!] Error: Block index {block_index} is out of range (1-{len(blocks)}).")
+            else:
+                print(f"\n--- Block Overview (First 5) ---")
+                print(f"{'ID':<5} | {'Algo':<8} | {'Size':<10} | {'Orig Size':<10}")
+                print("-" * 45)
+                for b in blocks[:5]:
+                    print(f"{b['id']+1:<5} | {b['algo']:<8} | {b['size']:<10} | {b['orig_size']:<10}")
+                if len(blocks) > 5:
+                    print(f"... and {len(blocks)-5} more blocks.")
+            print(f"{'='*50}\n")
 
     def _decompress_block(self, c_data: bytes, algo: str):
         if algo == "zstd" and not zstd:
@@ -195,6 +302,9 @@ class GXDDecompressor:
             return None, "Error: 'lz4' module required."
         if algo == "brotli" and not brotli:
             return None, "Error: 'brotli' module required."
+        if algo == "none":
+            if (not zstd) and (not lz4) and (not brotli):
+                return None, "Error: No decompression modules available."
 
         try:
             if algo == "zstd":
@@ -277,7 +387,11 @@ class GXDDecompressor:
                     for b, b_logic_start in target_blocks:
                         f_in.seek(b['start'])
                         compressed_chunk = f_in.read(b['size'])
-                        futures.append(executor.submit(self._decompress_worker, compressed_chunk, algo, b, b_logic_start))
+                        if algo == 'auto':
+                            target_algo = b.get('algo', metadata.get('algo', 'none'))
+                            futures.append(executor.submit(self._decompress_worker, compressed_chunk, target_algo, b, b_logic_start))
+                        else:
+                            futures.append(executor.submit(self._decompress_worker, compressed_chunk, algo, b, b_logic_start))
 
                     if show_progress and tqdm:
                         pbar = tqdm(total=len(target_blocks), desc="Decompressing", unit="blk", file=sys.stderr)
@@ -323,6 +437,13 @@ class GXDDecompressor:
         finally:
             if output_path and out_stream:
                 out_stream.close()
+            if not is_seek and not self.output_text and 'file_attr' in metadata:
+                    attr = metadata['file_attr']
+                    try:
+                        os.utime(output_path, (attr['atime'], attr['mtime']))
+                        os.chmod(output_path, attr['mode'])
+                    except Exception as e:
+                        sys.stderr.write(f"[!] Warning: Could not restore all file attributes: {e}\n")
 
 def main():
     threads_help = "Number of parallel threads. Supported: 1 to 128 (default: all CPU cores)"
@@ -355,7 +476,7 @@ Author's GitHub: https://github.com/hejhdiss
     
     c_parser.add_argument("input", help="Path to the source file to be compressed")
     c_parser.add_argument("output", help="Path where the resulting .gxd file will be saved")
-    c_parser.add_argument("--algo", choices=['zstd', 'lz4', 'brotli', 'none'], default='zstd', 
+    c_parser.add_argument("--algo", choices=['auto','zstd', 'lz4', 'brotli', 'none'], default='zstd', 
                           help=algo_help)
     c_parser.add_argument("--block-size", default="1024kb", 
                           help="Size of data blocks (e.g., 512kb, 1mb, 2mb. default: 1024kb)")
@@ -409,6 +530,16 @@ Author's GitHub: https://github.com/hejhdiss
                           help="Disable integrity checks")
     s_parser.set_defaults(verify="block")
 
+    # --- Info Command ---
+    i_parser = subparsers.add_parser(
+        "info", 
+        help="View GXD archive metadata",
+        description="Displays global file attributes and detailed block metadata."
+    )
+    i_parser.add_argument("input", help="Path to the .gxd archive")
+    i_parser.add_argument("--block", type=int, help="Get metadata for a specific block (1-based index)")
+    i_parser.add_argument("--threads", type=int, default=os.cpu_count(), help="Number of threads")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -442,6 +573,9 @@ Author's GitHub: https://github.com/hejhdiss
                 length=parse_size(args.length) if args.length else None, 
                 is_seek=True
             )
+        elif args.command == "info":
+            dec = GXDDecompressor(threads=args.threads)
+            dec.show_info(args.input, block_index=args.block)
     except Exception as e:
         sys.stderr.write(f"[-] An unexpected error occurred: {e}\n")
         sys.exit(1)
